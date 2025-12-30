@@ -9,10 +9,18 @@ class LithuanianCityDistance:
         self.headers = {'User-Agent': user_agent}
         self.coordinate_cache = {}
         self.rate_limit_delay = rate_limit_delay
+        self.cache_hits = 0
+        self.cache_misses = 0
     
     def get_coordinates(self, city_name):
+        city_name = city_name.strip().title()
+        
         if city_name in self.coordinate_cache:
-            return self.coordinate_cache[city_name]
+            self.cache_hits += 1
+            cached_value = self.coordinate_cache[city_name]
+            return cached_value if cached_value != "INVALID" else None
+        
+        self.cache_misses += 1
         
         params = {
             'q': f'{city_name}, Lithuania',
@@ -32,21 +40,25 @@ class LithuanianCityDistance:
                 self.coordinate_cache[city_name] = (lat, lon)
                 return (lat, lon)
             else:
-                print(f"No coordinates found for {city_name}")
+                self.coordinate_cache[city_name] = "INVALID"
                 return None
+                
         except requests.exceptions.Timeout:
-            print(f"Timeout error for {city_name}")
+            self.coordinate_cache[city_name] = "INVALID"
             return None
         except requests.exceptions.TooManyRedirects:
-            print(f"Redirect error for {city_name}")
+            self.coordinate_cache[city_name] = "INVALID"
             return None
-        except requests.exceptions.RequestException as e:
-            print(f"API error for {city_name}: {e}")
+        except requests.exceptions.RequestException:
+            self.coordinate_cache[city_name] = "INVALID"
             return None
         finally:
             time.sleep(self.rate_limit_delay)
     
     def validate_city(self, city_name):
+        city_name = city_name.strip().title()
+        if city_name in self.coordinate_cache:
+            return self.coordinate_cache[city_name] != "INVALID"
         coords = self.get_coordinates(city_name)
         return coords is not None
     
@@ -60,13 +72,25 @@ class LithuanianCityDistance:
         else:
             return None
     
+    def calculate_distance(self, city1, city2, unit='km'):
+        coord1 = self.get_coordinates(city1)
+        coord2 = self.get_coordinates(city2)
+        
+        if coord1 and coord2:
+            distance_km = geodesic(coord1, coord2).kilometers
+            if unit == 'miles':
+                return round(distance_km * 0.621371, 2)
+            return round(distance_km, 2)
+        return None
+    
     def create_distance_matrix(self, city_list):
-        coords = {city: self.get_coordinates(city) for city in city_list}
+        cleaned_cities = [city.strip().title() for city in city_list]
+        coords = {city: self.get_coordinates(city) for city in cleaned_cities}
         
         matrix_data = []
-        for city1 in city_list:
+        for city1 in cleaned_cities:
             row = []
-            for city2 in city_list:
+            for city2 in cleaned_cities:
                 if city1 == city2:
                     row.append(0.0)
                 elif coords[city1] and coords[city2]:
@@ -76,7 +100,7 @@ class LithuanianCityDistance:
                     row.append(None)
             matrix_data.append(row)
         
-        return pd.DataFrame(matrix_data, index=city_list, columns=city_list)
+        return pd.DataFrame(matrix_data, index=cleaned_cities, columns=cleaned_cities)
     
     def export_matrix(self, df, filename, format='csv'):
         if format == 'csv':
@@ -85,19 +109,64 @@ class LithuanianCityDistance:
             df.to_excel(filename)
         else:
             raise ValueError("Unsupported format. Use 'csv' or 'excel'")
+    
+    def get_coordinates_batch(self, city_list):
+        results = {}
+        for city in city_list:
+            clean_city = city.strip().title()
+            if clean_city not in self.coordinate_cache:
+                results[clean_city] = self.get_coordinates(clean_city)
+            else:
+                results[clean_city] = self.coordinate_cache[clean_city]
+            time.sleep(self.rate_limit_delay)
+        return results
+    
+    def get_cache_stats(self):
+        valid_entries = sum(1 for v in self.coordinate_cache.values() if v != "INVALID")
+        invalid_entries = sum(1 for v in self.coordinate_cache.values() if v == "INVALID")
+        return {
+            'total': len(self.coordinate_cache),
+            'valid': valid_entries,
+            'invalid': invalid_entries,
+            'hits': self.cache_hits,
+            'misses': self.cache_misses
+        }
+    
+    def clear_cache(self):
+        self.coordinate_cache.clear()
+        self.cache_hits = 0
+        self.cache_misses = 0
 
 if __name__ == "__main__":
-    distance_finder = LithuanianCityDistance(user_agent="LT_Distance_Calculator", rate_limit_delay=1)
-    
-    cities_to_check = ["Vilnius", "Kaunas", "Klaipėda", "Šiauliai", "Panevėžys"]
-    
-    for city in cities_to_check:
-        coords = distance_finder.get_coordinates(city)
-        if coords:
-            print(f"{city}: {coords}")
-    
-    dist_matrix = distance_finder.create_distance_matrix(cities_to_check)
-    print("Distance Matrix (km):")
-    print(dist_matrix)
-    
-    distance_finder.export_matrix(dist_matrix, "lithuanian_city_distances.csv")
+    try:
+        distance_finder = LithuanianCityDistance(user_agent="LT_Distance_Calculator", rate_limit_delay=1)
+        
+        cities_to_check = ["Vilnius", "Kaunas", "Klaipėda", "Šiauliai", "Panevėžys", "UnknownCity"]
+        
+        valid_cities = []
+        for city in cities_to_check:
+            if distance_finder.validate_city(city):
+                valid_cities.append(city)
+                coords = distance_finder.get_coordinates(city)
+                print(f"{city}: {coords}")
+            else:
+                print(f"Warning: {city} not found")
+        
+        if len(valid_cities) >= 2:
+            dist_matrix = distance_finder.create_distance_matrix(valid_cities)
+            print("Distance Matrix (km):")
+            print(dist_matrix)
+            
+            distance_finder.export_matrix(dist_matrix, "lithuanian_city_distances.csv")
+            print(f"Matrix saved to lithuanian_city_distances.csv")
+            
+            print("Cache Statistics:")
+            print(distance_finder.get_cache_stats())
+            
+            vilnius_kaunas = distance_finder.calculate_distance("Vilnius", "Kaunas", unit='miles')
+            print(f"Vilnius to Kaunas: {vilnius_kaunas} miles")
+        else:
+            print("Need at least 2 valid cities to create distance matrix")
+            
+    except Exception as e:
+        print(f"Error: {e}")
